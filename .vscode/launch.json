@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:iphone-reset-utility}",
+            "name": "Debug iosbk",
+            "target": "iosbk",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug iosbk"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:iphone-reset-utility}",
+            "name": "Release iosbk",
+            "target": "iosbk",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release iosbk"
+        }
+    ]
+}

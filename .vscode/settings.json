@@ -1,0 +1,7 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "swift": true,
+        "./.build/debug/iosbk": true,
+        ".build/release/iosbk": true
+    }
+}
