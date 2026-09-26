@@ -26,6 +26,27 @@ struct WifiPluginTests {
         #expect(networks.isEmpty)
     }
 
+    @Test("parses the modern known-networks shape (SSID bytes + SupportedSecurityTypes)")
+    func parsesModernKnownNetworksShape() throws {
+        let backup = try Fixture.wifiKnownNetworksBackup()
+        let networks = try WifiPlugin().extract(backup, dryRun: false)
+        #expect(networks.count == 3)
+
+        // SSID is recovered from the raw `SSID` bytes, not the dictionary key.
+        let home = try #require(networks.first { $0.ssid == "HomeNet" })
+        #expect(home.encryption == "WPA2")
+        #expect(home.hidden == false)
+
+        let cafe = try #require(networks.first { $0.ssid == "CafeGuest" })
+        #expect(cafe.encryption == "None")
+        #expect(cafe.hidden == true)
+
+        // Passpoint entries have no SSID bytes; the SSID falls back to the
+        // dictionary key with its `wifi.network.passpoint.` prefix stripped.
+        let passpoint = try #require(networks.first { $0.ssid == "example.com" })
+        #expect(passpoint.encryption == "WPA3")
+    }
+
     @Test("payloads() never includes a Password key")
     func payloadsNeverIncludePassword() throws {
         let backup = try Fixture.wifiBackup()

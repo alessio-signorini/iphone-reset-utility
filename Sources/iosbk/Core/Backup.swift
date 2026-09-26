@@ -18,6 +18,7 @@ struct BackupFile: Sendable {
 
 enum BackupError: Error, CustomStringConvertible {
     case encrypted
+    case manifestUnreadable(String)
     case notFound(String)
     case noBackupsFound(URL)
 
@@ -26,6 +27,9 @@ enum BackupError: Error, CustomStringConvertible {
         case .encrypted:
             return "This backup is encrypted. iosbk v1 only supports unencrypted backups. " +
                 "In Finder/Apple Configurator, uncheck \"Encrypt local backup\" and make a new backup."
+        case .manifestUnreadable(let reason):
+            return "Manifest.db is not a readable SQLite database (\(reason)). " +
+                "The backup may be corrupt, or the encryption password changed between backups."
         case .notFound(let what):
             return "Not found in backup: \(what)"
         case .noBackupsFound(let root):
@@ -47,10 +51,10 @@ struct Backup {
 
     let dir: URL
     private let manifest: Sqlite
+    private let decryptor: BackupDecryptor?
 
-    /// Finds the newest backup directory under `root` (i.e. the directory
-    /// containing a `Manifest.db`, most-recently modified).
-    static func newest(root: URL = defaultRoot) throws -> Backup {
+    /// Returns the URL of the newest backup directory under `root`.
+    static func newestDir(root: URL = defaultRoot) throws -> URL {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey],
@@ -58,18 +62,29 @@ struct Backup {
         else {
             throw BackupError.noBackupsFound(root)
         }
-
         let candidates = entries.filter { fm.fileExists(atPath: $0.appending(path: "Manifest.db").path) }
         guard !candidates.isEmpty else {
             throw BackupError.noBackupsFound(root)
         }
-
-        let newest = candidates.max { a, b in
+        return candidates.max { a, b in
             let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return da < db
         }!
-        return try Backup(dir: newest)
+    }
+
+    /// Finds the newest backup directory under `root` and opens it.
+    static func newest(root: URL = defaultRoot) throws -> Backup {
+        try Backup(dir: try newestDir(root: root))
+    }
+
+    /// Whether the backup at `dir` is password-encrypted, per the
+    /// authoritative `IsEncrypted` flag in `Manifest.plist`.
+    static func isEncrypted(dir: URL) -> Bool {
+        let path = dir.appending(path: "Manifest.plist")
+        guard let data = try? Data(contentsOf: path),
+              let plist = try? Plist.read(data) else { return false }
+        return (plist["IsEncrypted"] as? Bool) == true
     }
 
     /// Opens the backup at `dir`. Throws `BackupError.encrypted` if
@@ -82,18 +97,82 @@ struct Backup {
             throw BackupError.notFound(manifestPath.path)
         }
 
+        // Check Manifest.plist for the authoritative IsEncrypted flag before
+        // attempting to open the database, so the error is always accurate.
+        if Self.isEncrypted(dir: dir) {
+            throw BackupError.encrypted
+        }
+
         // Never open the backup's own Manifest.db in place: copy to a
         // private temp file first so we never lock/write the real backup.
         let tmp = try Self.copyToTemp(manifestPath)
-        guard let db = try? Sqlite(path: tmp) else {
-            throw BackupError.encrypted
+        let db: Sqlite
+        do {
+            db = try Sqlite(path: tmp)
+        } catch {
+            throw BackupError.manifestUnreadable(error.localizedDescription)
         }
         // Probe with a real query, since sqlite3_open_v2 succeeds lazily for
         // some non-SQLite files until the first read.
-        guard (try? db.query("SELECT 1 FROM Files LIMIT 1")) != nil else {
-            throw BackupError.encrypted
+        do {
+            _ = try db.query("SELECT 1 FROM Files LIMIT 1")
+        } catch {
+            throw BackupError.manifestUnreadable(error.localizedDescription)
         }
         self.manifest = db
+        self.decryptor = nil
+    }
+
+    /// Opens and decrypts the encrypted backup at `dir` using `password`.
+    /// If `Manifest.plist` does not have `IsEncrypted = true` the password is
+    /// ignored and the backup is opened as a plain unencrypted backup.
+    init(dir: URL, password: String) throws {
+        guard Self.isEncrypted(dir: dir) else {
+            // Backup has no user password — open it the normal way.
+            self = try Backup(dir: dir)
+            return
+        }
+
+        let manifestPlistPath = dir.appending(path: "Manifest.plist")
+        guard let plistData = try? Data(contentsOf: manifestPlistPath),
+              let plist = try? Plist.read(plistData) else {
+            throw BackupError.notFound(manifestPlistPath.path)
+        }
+        guard let keybagData = plist["BackupKeyBag"] as? Data else {
+            throw BackupError.manifestUnreadable("no BackupKeyBag in Manifest.plist")
+        }
+        guard let manifestKey = plist["ManifestKey"] as? Data else {
+            throw BackupError.manifestUnreadable("no ManifestKey in Manifest.plist")
+        }
+
+        let dec = try BackupDecryptor(keybagData: keybagData, password: password)
+
+        let manifestDBPath = dir.appending(path: "Manifest.db")
+        let encryptedDB = try Data(contentsOf: manifestDBPath)
+        let plainDB = try dec.decryptManifestDB(manifestKey: manifestKey, encryptedDB: encryptedDB)
+
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appending(path: "iosbk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let tmpDB = tmpDir.appending(path: "Manifest.db")
+        try plainDB.write(to: tmpDB)
+
+        self.dir = dir
+        // Open read-write: the decrypted manifest declares WAL journal mode in
+        // its header but has no `-wal` sidecar, which SQLite rejects read-only.
+        self.manifest = try Sqlite(path: tmpDB, readOnly: false)
+        self.decryptor = dec
+    }
+
+    /// Distinct domain names in this backup's manifest containing
+    /// `substring` (case-insensitive). Useful for diagnosing a plugin whose
+    /// hardcoded domain constant doesn't match what a given iOS version
+    /// actually uses (e.g. `ShortcutsExport`'s app-group domain), without
+    /// requiring the user to inspect `Manifest.db` by hand.
+    func domains(matching substring: String) throws -> [String] {
+        let sql = "SELECT DISTINCT domain FROM Files WHERE domain LIKE \(Self.quote("%\(substring)%")) COLLATE NOCASE"
+        let rows = try manifest.query(sql)
+        return rows.compactMap { $0.string("domain") }.sorted()
     }
 
     /// Resolves logical entries to physical files. Filters to `flags == 1`
@@ -125,17 +204,100 @@ struct Backup {
         try Plist.read(try readData(f))
     }
 
-    /// Reads the raw physical bytes for a backup file.
+    /// Reads the raw physical bytes for a backup file, decrypting if needed.
     func readData(_ f: BackupFile) throws -> Data {
         guard FileManager.default.fileExists(atPath: f.path.path) else {
             throw BackupError.notFound(f.rel)
         }
-        return try Data(contentsOf: f.path, options: [.mappedIfSafe])
+        let raw = try Data(contentsOf: f.path, options: [.mappedIfSafe])
+        guard let dec = decryptor else { return raw }
+        // Fetch the per-file MBFile blob (protection class + wrapped key) from
+        // the decrypted Manifest.db so BackupDecryptor can unwrap the file key.
+        let rows = try manifest.query(
+            "SELECT file FROM Files WHERE fileID = \(Self.quote(f.id)) LIMIT 1")
+        let fileBlob = rows.first?.data("file")
+        return try dec.decryptFile(fileBlob: fileBlob, ciphertext: raw)
+    }
+
+    /// Recovers `SSID -> Wi-Fi password` from the backup keychain.
+    ///
+    /// Returns an empty map for unencrypted backups (whose keychain isn't
+    /// decryptable) or when `keychain-backup.plist` is absent/unreadable, so
+    /// callers can treat missing passwords as "not available" rather than an
+    /// error.
+    func keychainWifiPasswords() -> [String: String] {
+        guard let dec = decryptor else { return [:] }
+        guard let file = (try? files(pathLike: "%keychain-backup.plist"))?.first,
+              let data = try? readData(file),
+              let plist = try? Plist.read(data)
+        else { return [:] }
+        return Keychain.wifiPasswords(plist: plist, decryptor: dec)
+    }
+
+    /// Recovers decrypted `genp`/`inet` password items from the backup
+    /// keychain, for callers that match them to accounts (mail, VPN).
+    ///
+    /// Returns an empty list for unencrypted backups (no decryptable keychain)
+    /// or when `keychain-backup.plist` is absent/unreadable.
+    func keychainSecrets() -> [Keychain.Secret] {
+        guard let dec = decryptor else { return [] }
+        guard let file = (try? files(pathLike: "%keychain-backup.plist"))?.first,
+              let data = try? readData(file),
+              let plist = try? Plist.read(data)
+        else { return [] }
+        return Keychain.secrets(plist: plist, decryptor: dec)
+    }
+
+    /// Recovers DER certificates from the backup keychain (`cert` items).
+    ///
+    /// Returns an empty list for unencrypted backups (no decryptable keychain)
+    /// or when `keychain-backup.plist` is absent/unreadable.
+    func keychainCertificates() -> [Keychain.Certificate] {
+        guard let dec = decryptor else { return [] }
+        guard let file = (try? files(pathLike: "%keychain-backup.plist"))?.first,
+              let data = try? readData(file),
+              let plist = try? Plist.read(data)
+        else { return [] }
+        return Keychain.certificates(plist: plist, decryptor: dec)
+    }
+
+    /// Decrypts and copies every backup file matching `(domain, pathLike)`
+    /// into `dest`, preserving a `<domain>/<relativePath>` layout. Returns
+    /// the number of files written. Directory/symlink entries are skipped.
+    ///
+    /// Guards against path traversal: a decoded `relativePath` that would
+    /// escape `dest` is skipped rather than written.
+    @discardableResult
+    func exportFiles(domain: String? = nil, pathLike: String? = nil, to dest: URL) throws -> Int {
+        let root = dest.standardizedFileURL
+        var count = 0
+        for f in try files(domain: domain, pathLike: pathLike) {
+            let out = root.appending(path: f.domain).appending(path: f.rel).standardizedFileURL
+            guard out.path.hasPrefix(root.path + "/") else { continue } // reject traversal
+            try FileManager.default.createDirectory(
+                at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try readData(f).write(to: out)
+            count += 1
+        }
+        return count
     }
 
     /// Copies a backup file (expected to be a SQLite database, e.g.
-    /// `Accounts3.sqlite`) to a private temp location and opens it read-only.
+    /// `Accounts3.sqlite`) to a private temp location and opens it.
+    /// For encrypted backups the file is decrypted first.
     func openSqlite(_ f: BackupFile) throws -> Sqlite {
+        if decryptor != nil {
+            // Decrypt to a private temp file, then open. Opened read-write
+            // because a decrypted DB may declare WAL mode without a `-wal`
+            // sidecar, which SQLite rejects read-only.
+            let data = try readData(f)
+            let tmpDir = FileManager.default.temporaryDirectory
+                .appending(path: "iosbk-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            let dest = tmpDir.appending(path: f.path.lastPathComponent)
+            try data.write(to: dest)
+            return try Sqlite(path: dest, readOnly: false)
+        }
         let tmp = try Self.copyToTemp(f.path)
         return try Sqlite(path: tmp)
     }
@@ -152,6 +314,15 @@ struct Backup {
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let dest = tmpDir.appending(path: source.lastPathComponent)
         try FileManager.default.copyItem(at: source, to: dest)
+        // Copy WAL and SHM companions so SQLite sees a consistent snapshot
+        // when the source database uses WAL journaling mode.
+        let fm = FileManager.default
+        for suffix in ["-wal", "-shm"] {
+            let companion = URL(fileURLWithPath: source.path + suffix)
+            if fm.fileExists(atPath: companion.path) {
+                try fm.copyItem(at: companion, to: URL(fileURLWithPath: dest.path + suffix))
+            }
+        }
         return dest
     }
 
