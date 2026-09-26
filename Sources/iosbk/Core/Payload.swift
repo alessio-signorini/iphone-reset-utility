@@ -30,7 +30,9 @@ struct WifiPayload: Encodable {
     let SSID_STR: String
     let EncryptionType: String // None | WEP | WPA | Any
     let HIDDEN_NETWORK: Bool
-    // NOTE: no Password key in v1 (keychain out of scope).
+    /// Recovered from the backup keychain when available; nil -> key omitted
+    /// so the network is pre-staged and iOS prompts for the password once.
+    var Password: String? = nil
 }
 
 struct MailPayload: Encodable {
@@ -46,6 +48,10 @@ struct MailPayload: Encodable {
     let IncomingMailServerUsername: String?
     let OutgoingMailServerHostName: String?
     let OutgoingMailServerUsername: String?
+    /// Cleartext passwords, only populated by `profile --with-passwords`.
+    /// nil -> key omitted, so profiles are password-free by default.
+    var IncomingPassword: String? = nil
+    var OutgoingPassword: String? = nil
 }
 
 struct CalDAVPayload: Encodable {
@@ -70,6 +76,19 @@ struct CardDAVPayload: Encodable {
     let CardDAVUsername: String?
 }
 
+/// An X.509 certificate payload (`com.apple.security.pkcs1`). `PayloadContent`
+/// carries the raw DER certificate bytes, which iOS installs into the trust
+/// store when the profile is installed.
+struct CertificatePayload: Encodable {
+    let PayloadType = "com.apple.security.pkcs1"
+    let PayloadVersion = 1
+    let PayloadIdentifier: String
+    let PayloadUUID: String
+    let PayloadDisplayName: String
+    let PayloadCertificateFileName: String
+    let PayloadContent: Data // DER-encoded certificate
+}
+
 struct VPNPayload: Encodable {
     let PayloadType = "com.apple.vpn.managed"
     let PayloadVersion = 1
@@ -80,6 +99,10 @@ struct VPNPayload: Encodable {
     let VPNSubType: String?
     let VPNUsername: String?
     let VPNServer: String?
+    /// Cleartext secrets, only populated by `profile --with-passwords`.
+    /// nil -> key omitted, so profiles are password-free by default.
+    var VPNPassword: String? = nil
+    var SharedSecret: String? = nil
 }
 
 /// Type-erased array element so one profile can carry mixed payload types.
@@ -90,6 +113,7 @@ enum Payload: Encodable {
     case caldav(CalDAVPayload)
     case carddav(CardDAVPayload)
     case vpn(VPNPayload)
+    case certificate(CertificatePayload)
 
     func encode(to encoder: Encoder) throws {
         switch self {
@@ -99,6 +123,7 @@ enum Payload: Encodable {
         case .caldav(let p): try p.encode(to: encoder)
         case .carddav(let p): try p.encode(to: encoder)
         case .vpn(let p): try p.encode(to: encoder)
+        case .certificate(let p): try p.encode(to: encoder)
         }
     }
 }

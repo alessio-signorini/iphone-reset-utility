@@ -52,7 +52,7 @@ struct LiveBackupTests {
     /// Only runs when a device is tethered *and* Apple Configurator's
     /// `cfgutil` is installed; otherwise it's skipped with an explanatory
     /// message rather than failing the suite.
-    @Test("install profile --run against a throwaway profile (requires tethered device + cfgutil)")
+    @Test("profile install --run against a throwaway profile (requires tethered device + cfgutil)")
     func installProfileRunAgainstTetheredDevice() throws {
         guard CommandLine.arguments.contains("--iosbk-live-install") else {
             print("iosbk live: skipping install --run (pass --iosbk-live-install to opt in)")
@@ -95,5 +95,61 @@ struct LiveBackupTests {
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (output?.isEmpty ?? true) ? nil : output
+    }
+}
+
+// MARK: - Encrypted backup live tests
+
+/// Exercises plugins against the newest encrypted backup on this Mac.
+/// Requires both IOSBK_LIVE=1 and IOSBK_PASSWORD=<password> to be set.
+///
+/// Run with:
+///   IOSBK_LIVE=1 IOSBK_PASSWORD="your_password" swift test --filter EncryptedLiveBackupTests
+@Suite("Encrypted live backup",
+    .enabled(if: ProcessInfo.processInfo.environment["IOSBK_LIVE"] == "1"
+                 && ProcessInfo.processInfo.environment["IOSBK_PASSWORD"] != nil))
+struct EncryptedLiveBackupTests {
+
+    private func openEncryptedBackup() throws -> Backup {
+        let password = ProcessInfo.processInfo.environment["IOSBK_PASSWORD"]!
+        let dir = try Backup.newestDir()
+        return try Backup(dir: dir, password: password)
+    }
+
+    @Test("opens encrypted backup and reads Files table")
+    func opensAndReadsManifest() throws {
+        let backup = try openEncryptedBackup()
+        print("iosbk encrypted live: backup at \(backup.dir.path)")
+        // If Manifest.db was decrypted correctly, files() returns results.
+        let all = try backup.files()
+        print("iosbk encrypted live: \(all.count) total file entries in Manifest.db")
+        #expect(all.count > 0)
+    }
+
+    @Test("wrong password throws wrongPassword error")
+    func wrongPasswordThrows() throws {
+        let dir = try Backup.newestDir()
+        guard Backup.isEncrypted(dir: dir) else {
+            print("iosbk encrypted live: newest backup is not encrypted, skipping")
+            return
+        }
+        #expect(throws: BackupDecryptor.DecryptorError.wrongPassword) {
+            _ = try Backup(dir: dir, password: "definitely-wrong-password-\(UUID().uuidString)")
+        }
+    }
+
+    @Test("wifi plugin extracts networks from encrypted backup")
+    func wifiExtractsNetworks() throws {
+        let backup = try openEncryptedBackup()
+        let networks = try WifiPlugin().extract(backup, dryRun: true)
+        print("iosbk encrypted live: found \(networks.count) wifi network(s)")
+        // We can't assert a specific count, but we verify no crash and log the result.
+    }
+
+    @Test("accounts plugin extracts accounts from encrypted backup")
+    func accountsExtractsEntries() throws {
+        let backup = try openEncryptedBackup()
+        let entries = try AccountsPlugin().extract(backup, dryRun: true)
+        print("iosbk encrypted live: found \(entries.count) account(s)")
     }
 }
