@@ -13,6 +13,11 @@ protocol ExtractorPlugin: Sendable {
     var key: String { get }
     var summary: String { get }
 
+    /// Whether this plugin contributes payloads to `iosbk profile`'s
+    /// .mobileconfig output. `apps` restores via its own curate/download/
+    /// install workflow instead, so it opts out.
+    var buildsProfile: Bool { get }
+
     func extract(_ backup: Backup, dryRun: Bool) throws -> [Item]
 
     /// One-line human-readable description of `item`, used by `iosbk extract`
@@ -29,6 +34,7 @@ extension ExtractorPlugin {
         try extract(backup, dryRun: false)
     }
 
+    var buildsProfile: Bool { true }
     func describe(_ item: Item) -> String { "\(item)" }
     func payloads(_ items: [Item]) -> [Payload] { [] }
 }
@@ -39,6 +45,7 @@ extension ExtractorPlugin {
 struct AnyExtractorPlugin: Sendable {
     let key: String
     let summary: String
+    let buildsProfile: Bool
 
     private let _extract: @Sendable (Backup, Bool) throws -> [Any]
     private let _describe: @Sendable (Any) -> String
@@ -48,6 +55,7 @@ struct AnyExtractorPlugin: Sendable {
     init<P: ExtractorPlugin>(_ plugin: P) {
         self.key = plugin.key
         self.summary = plugin.summary
+        self.buildsProfile = plugin.buildsProfile
         self._extract = { backup, dryRun in try plugin.extract(backup, dryRun: dryRun) }
         self._describe = { any in
             guard let item = any as? P.Item else { return String(describing: any) }
@@ -84,6 +92,7 @@ enum Registry {
         AnyExtractorPlugin(WebClipsPlugin()),
         AnyExtractorPlugin(WifiPlugin()),
         AnyExtractorPlugin(AccountsPlugin()),
+        AnyExtractorPlugin(CertsPlugin()),
     ]
 
     static subscript(key: String) -> AnyExtractorPlugin? {

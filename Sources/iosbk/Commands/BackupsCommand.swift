@@ -30,7 +30,7 @@ struct BackupsCommand: ParsableCommand {
             let device = (info?["Device Name"] as? String) ?? "unknown device"
             let product = (info?["Product Type"] as? String).map { " (\($0))" } ?? ""
             let date = (info?["Last Backup Date"] as? Date).map { "\($0)" } ?? "unknown date"
-            let encrypted = (try? Backup(dir: dir)) == nil
+            let encrypted = Backup.isEncrypted(dir: dir)
             print("\(dir.lastPathComponent)  \(device)\(product)  last backup: \(date)\(encrypted ? "  [encrypted]" : "")  \(dir.path)")
         }
     }
