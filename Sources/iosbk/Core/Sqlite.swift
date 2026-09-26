@@ -26,12 +26,14 @@ final class Sqlite {
 
     private var db: OpaquePointer?
 
-    /// Opens `path` read-only. Throws `SqliteError.openFailed` if the file
-    /// cannot be opened as a SQLite database at all (this is how encrypted
-    /// backups are detected: an encrypted `Manifest.db` is not valid SQLite).
-    init(path: URL) throws {
+    /// Opens `path`. Defaults to read-only, which is how encrypted backups
+    /// are detected (an encrypted `Manifest.db` is not valid SQLite). Pass
+    /// `readOnly: false` for a private temp copy that must be opened writable
+    /// — e.g. a decrypted manifest whose header declares WAL journal mode but
+    /// ships without its `-wal` sidecar (SQLite refuses such a file read-only).
+    init(path: URL, readOnly: Bool = true) throws {
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY
+        let flags = readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE
         let rc = sqlite3_open_v2(path.path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
             let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -55,6 +57,11 @@ final class Sqlite {
         func int(_ column: String) -> Int? {
             if let v = values[column] as? Int { return v }
             if let v = values[column] as? Int64 { return Int(v) }
+            return nil
+        }
+        func double(_ column: String) -> Double? {
+            if let v = values[column] as? Double { return v }
+            if let v = values[column] as? Int { return Double(v) }
             return nil
         }
         func data(_ column: String) -> Data? { values[column] as? Data }
