@@ -1,23 +1,33 @@
 import Foundation
 import ArgumentParser
 
-/// Shared `--backup` / `--dry-run` options for every subcommand that reads
-/// from a backup.
+/// Shared `--backup` / `--password` / `--dry-run` options for every subcommand
+/// that reads from a backup.
 struct BackupOptions: ParsableArguments {
-    @Option(name: .customLong("backup"), help: "Backup directory to read (default: newest under ~/Library/Application Support/MobileSync/Backup, or $IOSBK_BACKUP).")
+    @Option(name: .customLong("backup"), help: "Backup directory to read (default: newest under ~/Library/Application Support/MobileSync/Backup, or $IOSBK_BACKUP)")
     var backup: String?
 
-    @Flag(name: .customLong("dry-run"), help: "Log every resolved file/path used during extraction to stderr.")
+    @Option(name: .customLong("password"), help: "Password for encrypted backups (or $IOSBK_PASSWORD)")
+    var password: String?
+
+    @Flag(name: .customLong("dry-run"), help: "Log every resolved file/path used during extraction to stderr")
     var dryRun: Bool = false
 
     func resolveBackup() throws -> Backup {
-        if let backup {
-            return try Backup(dir: URL(fileURLWithPath: backup))
+        let dir: URL
+        if let path = backup {
+            dir = URL(fileURLWithPath: path)
+        } else if let env = ProcessInfo.processInfo.environment["IOSBK_BACKUP"], !env.isEmpty {
+            dir = URL(fileURLWithPath: env)
+        } else {
+            dir = try Backup.newestDir()
         }
-        if let envPath = ProcessInfo.processInfo.environment["IOSBK_BACKUP"], !envPath.isEmpty {
-            return try Backup(dir: URL(fileURLWithPath: envPath))
+
+        let pw = password ?? ProcessInfo.processInfo.environment["IOSBK_PASSWORD"]
+        if let pw {
+            return try Backup(dir: dir, password: pw)
         }
-        return try Backup.newest()
+        return try Backup(dir: dir)
     }
 }
 
