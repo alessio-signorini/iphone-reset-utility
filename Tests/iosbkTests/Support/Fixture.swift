@@ -57,7 +57,13 @@ enum Fixture {
         let dir = FileManager.default.temporaryDirectory
             .appending(path: "iosbk-fixture-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Write a non-SQLite Manifest.db (as iOS does for encrypted backups).
         try Data("not a sqlite database".utf8).write(to: dir.appending(path: "Manifest.db"))
+        // Write Manifest.plist with IsEncrypted = true, as a real encrypted
+        // backup always has, so Backup.init(dir:) throws .encrypted.
+        let plist: [String: Any] = ["IsEncrypted": true]
+        let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
+        try plistData.write(to: dir.appending(path: "Manifest.plist"))
         return dir
     }
 
@@ -115,9 +121,11 @@ enum Fixture {
                 domain: "HomeDomain",
                 rel: "Library/WebClips/nourl.net.webclip/Info.plist",
                 data: try binaryPlist(["Title": "No URL"])),
-            // two installed apps
+            // two installed apps, plus a built-in system app that should
+            // be filtered out of the curated list.
             FixtureFile(domain: "AppDomain-com.example.foo", rel: ".com.apple.mobile_container_manager.metadata.plist"),
             FixtureFile(domain: "AppDomain-com.example.bar", rel: ".com.apple.mobile_container_manager.metadata.plist"),
+            FixtureFile(domain: "AppDomain-com.apple.Health", rel: ".com.apple.mobile_container_manager.metadata.plist"),
         ])
     }
 
@@ -136,7 +144,30 @@ enum Fixture {
         ])
     }
 
-    /// An empty backup (no wifi candidate paths present at all).
+    /// The modern (iOS 16+) `com.apple.wifi.known-networks.plist` shape: a
+    /// dictionary keyed by `wifi.network.ssid.<SSID>` whose values carry the
+    /// SSID as raw bytes, a `SupportedSecurityTypes` descriptor, and `Hidden`.
+    static func wifiKnownNetworksBackup() throws -> Backup {
+        let candidate = WifiPlugin.candidatePaths[0]
+        let plist: [String: Any] = [
+            "wifi.network.ssid.HomeNet": [
+                "SSID": Data("HomeNet".utf8),
+                "SupportedSecurityTypes": "WPA2 Personal",
+                "Hidden": false,
+            ],
+            "wifi.network.ssid.CafeGuest": [
+                "SSID": Data("CafeGuest".utf8),
+                "SupportedSecurityTypes": "Open",
+                "Hidden": true,
+            ],
+            "wifi.network.passpoint.example.com": [
+                "SupportedSecurityTypes": "WPA3 Personal",
+            ],
+        ]
+        return try build([
+            FixtureFile(domain: candidate.domain, rel: candidate.rel, data: try binaryPlist(plist)),
+        ])
+    }
     static func emptyBackup() throws -> Backup {
         try build([
             FixtureFile(domain: "HomeDomain", rel: "Library/Preferences/unrelated.plist"),
@@ -200,4 +231,22 @@ enum Fixture {
                 data: accountsData),
         ])
     }
+
+    /// Builds a `FixtureFile` whose bytes are a real SQLite database, seeded
+    /// by `populate`. Use with `Fixture.build([...])` to place an app
+    /// database (contacts, calls, calendar, …) inside a synthetic backup.
+    static func sqliteFile(
+        domain: String, rel: String, _ populate: (SqliteWriter) throws -> Void
+    ) throws -> FixtureFile {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appending(path: "iosbk-fixture-db-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let path = tmpDir.appending(path: (rel as NSString).lastPathComponent)
+        let db = try SqliteWriter(path: path)
+        try populate(db)
+        db.close()
+        return FixtureFile(domain: domain, rel: rel, data: try Data(contentsOf: path))
+    }
 }
+
