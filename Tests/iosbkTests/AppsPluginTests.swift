@@ -4,9 +4,9 @@ import Testing
 
 @Suite("AppsPlugin")
 struct AppsPluginTests {
-    @Test("extracts distinct, sorted bundle IDs from AppDomain-* entries")
+    @Test("extracts distinct, sorted bundle IDs from AppDomain-* entries, excluding com.apple.*")
     func extractsSortedBundleIDs() throws {
-        let backup = try Fixture.webclipsBackup() // includes two AppDomain-* rows
+        let backup = try Fixture.webclipsBackup() // includes two 3rd-party + one com.apple.* AppDomain-* rows
         let bundleIDs = try AppsPlugin().extract(backup, dryRun: false)
         #expect(bundleIDs == ["com.example.bar", "com.example.foo"])
     }
@@ -75,5 +75,42 @@ struct AppsPluginTests {
         let (commands, warnings) = AppsPlugin.restoreCommands(apps: apps, strategy: .appstoreOpen, ipaDir: nil)
         #expect(commands == ["open \"itms-apps://itunes.apple.com/app/id123456\""])
         #expect(warnings.contains { $0.contains("com.example.bar") })
+    }
+
+    @Test("htmlPage generates itms-apps links for enriched apps and a warning section for missing store IDs")
+    func htmlPageContainsCorrectLinks() {
+        let apps = [
+            CuratedApp(bundleID: "com.example.foo", name: "Foo <App>", storeID: 111, keep: true),
+            CuratedApp(bundleID: "com.example.bar", name: "Bar",        storeID: 222, keep: true),
+            CuratedApp(bundleID: "com.example.baz", name: "Baz",        storeID: nil, keep: true),
+            CuratedApp(bundleID: "com.example.skip", name: "Skip",      storeID: 333, keep: false),
+        ]
+        let page = AppsPlugin.htmlPage(apps: apps)
+
+        // Enriched apps get itms-apps:// links
+        #expect(page.contains("itms-apps://itunes.apple.com/app/id111"))
+        #expect(page.contains("itms-apps://itunes.apple.com/app/id222"))
+        // keep=false app is excluded entirely
+        #expect(!page.contains("id333"))
+        // HTML special chars in name are escaped
+        #expect(page.contains("Foo &lt;App&gt;"))
+        // Missing-storeID app appears in the warning section (no real link)
+        #expect(page.contains("Baz"))
+        #expect(!page.contains("itms-apps://itunes.apple.com/app/id\(0)"))
+        // Count badge shown
+        #expect(page.contains("2 apps"))
+    }
+
+    @Test("downloadWarnings emits a hint only for kept apps whose name is nil")
+    func downloadWarningsOnlyForUnenrichedKeptApps() {
+        let apps = [
+            CuratedApp(bundleID: "com.example.named",   name: "Named",  storeID: 1, keep: true),
+            CuratedApp(bundleID: "com.example.unnamed", name: nil,       storeID: nil, keep: true),
+            CuratedApp(bundleID: "com.example.skipped", name: nil,       storeID: nil, keep: false),
+        ]
+        let warnings = AppsPlugin.downloadWarnings(apps: apps)
+        #expect(warnings.count == 1)
+        #expect(warnings[0].contains("com.example.unnamed"))
+        // named app and skipped app produce no warnings
     }
 }

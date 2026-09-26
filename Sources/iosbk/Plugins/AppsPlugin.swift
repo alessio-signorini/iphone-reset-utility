@@ -11,6 +11,9 @@ import Foundation
 struct AppsPlugin: ExtractorPlugin {
     let key = "apps"
     let summary = "Installed third-party apps (bundle IDs)"
+    // Restores via its own curate/download/install workflow (`iosbk apps`),
+    // not via `iosbk profile`.
+    let buildsProfile = false
 
     func extract(_ backup: Backup, dryRun: Bool) throws -> [String] {
         let files = try backup.files(includeDirs: true)
@@ -18,10 +21,14 @@ struct AppsPlugin: ExtractorPlugin {
             .map(\.domain)
             .filter { $0.hasPrefix("AppDomain-") }
             .map { String($0.dropFirst("AppDomain-".count)) }
+            // com.apple.* entries are built-in/system apps and services that
+            // reinstall automatically with iOS itself — not something the
+            // App Store can (re)install, so they're noise in a restore list.
+            .filter { !$0.hasPrefix("com.apple.") }
         let unique = Set(bundleIDs)
         if dryRun {
             FileHandle.standardError.write(
-                "apps: found \(unique.count) AppDomain-* entries\n".data(using: .utf8)!)
+                "apps: found \(unique.count) AppDomain-* entries (excluding com.apple.*)\n".data(using: .utf8)!)
         }
         return unique.sorted()
     }
@@ -96,6 +103,7 @@ extension AppsPlugin {
     enum InstallStrategy: String, CaseIterable {
         case cfgutil
         case appstoreOpen = "appstore-open"
+        case html
     }
 
     /// Restore-command generation for a curated `apps.yml`. Only apps with
@@ -132,8 +140,101 @@ extension AppsPlugin {
                     continue
                 }
                 commands.append("open \"itms-apps://itunes.apple.com/app/id\(storeID)\"")
+            case .html:
+                preconditionFailure("html strategy must be handled by the caller before invoking restoreCommands")
             }
         }
         return (commands, warnings)
+    }
+
+    /// Generates a self-contained, mobile-friendly HTML page with an
+    /// `itms-apps://` link for every kept, enriched app.
+    ///
+    /// The page is intended to be AirDropped to the iPhone and opened in
+    /// Safari, where each button opens the App Store page for that app.
+    /// Apps that are missing a `storeID` (not yet enriched) are listed
+    /// separately as a reminder to run `curate apps --enrich` first.
+    static func htmlPage(apps: [CuratedApp]) -> String {
+        let kept = apps.filter(\.keep)
+        let enriched = kept.filter { $0.storeID != nil }
+        let missing  = kept.filter { $0.storeID == nil }
+
+        var html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>App Store Install List</title>
+          <style>
+            :root { color-scheme: light dark; font-family: -apple-system, sans-serif; }
+            body  { margin: 0; padding: 16px; background: #f2f2f7; }
+            h1    { font-size: 22px; margin: 0 0 4px; }
+            p.sub { color: #8e8e93; margin: 0 0 20px; font-size: 14px; }
+            ul    { list-style: none; padding: 0; margin: 0 0 28px; }
+            li    { margin-bottom: 10px; }
+            a.btn {
+              display: block; padding: 14px 16px;
+              background: #fff; border-radius: 12px;
+              text-decoration: none; color: #1c1c1e;
+              font-size: 16px; font-weight: 500;
+              box-shadow: 0 1px 3px rgba(0,0,0,.12);
+            }
+            a.btn span.badge {
+              float: right; font-size: 14px; font-weight: 600;
+              color: #007aff;
+            }
+            h2 { font-size: 15px; color: #8e8e93; text-transform: uppercase;
+                 letter-spacing: .04em; margin: 0 0 8px; }
+            .warn { color: #ff9500; }
+            @media (prefers-color-scheme: dark) {
+              body  { background: #1c1c1e; }
+              a.btn { background: #2c2c2e; color: #f2f2f7;
+                      box-shadow: none; }
+            }
+          </style>
+        </head>
+        <body>
+          <h1>App Store Install List</h1>
+          <p class="sub">\(enriched.count) app\(enriched.count == 1 ? "" : "s") — tap each to open the App Store</p>
+        """
+
+        if !enriched.isEmpty {
+            html += "  <ul>\n"
+            for app in enriched {
+                let label = app.name ?? app.bundleID
+                let url   = "itms-apps://itunes.apple.com/app/id\(app.storeID!)"
+                html += "    <li><a class=\"btn\" href=\"\(url)\">\(escapeHTML(label))<span class=\"badge\">GET</span></a></li>\n"
+            }
+            html += "  </ul>\n"
+        }
+
+        if !missing.isEmpty {
+            html += "  <h2 class=\"warn\">Missing Store ID — run <code>iosbk apps curate --enrich</code></h2>\n  <ul>\n"
+            for app in missing {
+                let label = app.name ?? app.bundleID
+                html += "    <li><a class=\"btn\" href=\"#\">\(escapeHTML(label))</a></li>\n"
+            }
+            html += "  </ul>\n"
+        }
+
+        html += "</body>\n</html>\n"
+        return html
+    }
+
+    private static func escapeHTML(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+         .replacingOccurrences(of: "<", with: "&lt;")
+         .replacingOccurrences(of: ">", with: "&gt;")
+         .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    /// Warnings for the download flow: hints for kept apps with no display
+    /// name, so the user can verify the bundle ID is correct before downloading.
+    static func downloadWarnings(apps: [CuratedApp]) -> [String] {
+        apps.filter(\.keep).compactMap { app in
+            guard app.name == nil else { return nil }
+            return "\(app.bundleID) has no display name — run `iosbk apps curate --enrich` to verify the bundle ID before downloading"
+        }
     }
 }
