@@ -51,4 +51,55 @@ struct WebClipsPluginTests {
         let withIcon = try #require(content.first { ($0["Icon"] as? Data) != nil })
         #expect(withIcon["Icon"] as? Data == Fixture.onePixelPNG(tag: "example"))
     }
+
+    @Test("a Shortcuts web clip's unstable id is dropped, keeping only name")
+    func stripsUnstableShortcutID() throws {
+        let backup = try Fixture.build([
+            FixtureFile(
+                domain: "HomeDomain",
+                rel: "Library/WebClips/shortcut.webclip/Info.plist",
+                data: try Fixture.binaryPlist([
+                    "URL": "shortcuts://x-callback-url/run-shortcut?name=Log%20Mood&id=D30C8F26-C30F-41B3-8F83-D1D1B2655433&source=homescreen",
+                    "Title": "Log Mood",
+                ])),
+        ])
+        let clips = try WebClipsPlugin().extract(backup, dryRun: false)
+        #expect(clips.count == 1)
+        let clip = try #require(clips.first)
+        #expect(!clip.url.contains("id="))
+        #expect(clip.url.contains("name=Log%20Mood") || clip.url.contains("name=Log+Mood"))
+        #expect(clip.url.contains("source=homescreen"))
+
+        #expect(WebClipsPlugin().describe(clip).contains("runs Shortcut \"Log Mood\" by name"))
+    }
+
+    @Test("flags whether the target Shortcut was also recovered from the backup")
+    func flagsShortcutAvailability() throws {
+        let shortcutClipInfo: (String) -> Data = { name in
+            try! Fixture.binaryPlist([
+                "URL": "shortcuts://x-callback-url/run-shortcut?name=\(name.replacingOccurrences(of: " ", with: "%20"))",
+                "Title": name,
+            ])
+        }
+        let backup = try Fixture.build([
+            FixtureFile(
+                domain: "HomeDomain", rel: "Library/WebClips/found.webclip/Info.plist",
+                data: shortcutClipInfo("Log Mood")),
+            FixtureFile(
+                domain: "HomeDomain", rel: "Library/WebClips/missing.webclip/Info.plist",
+                data: shortcutClipInfo("Deleted Shortcut")),
+            FixtureFile(
+                domain: ShortcutsExport.domain, rel: "Documents/Log Mood.shortcut",
+                data: Data("SHORTCUT".utf8)),
+        ])
+        let clips = try WebClipsPlugin().extract(backup, dryRun: false)
+
+        let found = try #require(clips.first { $0.title == "Log Mood" })
+        #expect(found.shortcutFound == true)
+        #expect(WebClipsPlugin().describe(found).contains("found in this backup"))
+
+        let missing = try #require(clips.first { $0.title == "Deleted Shortcut" })
+        #expect(missing.shortcutFound == false)
+        #expect(WebClipsPlugin().describe(missing).contains("not found in this backup"))
+    }
 }
