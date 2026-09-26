@@ -2,3 +2,10 @@
 .swiftpm/
 *.xcodeproj
 .DS_Store
+/iosbk
+
+# Local export output (real personal data from a backup, never commit)
+/out/
+/wallet/
+/sc-export/
+/apps/
