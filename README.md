@@ -1,4 +1,4 @@
-# 📱 iosbk - iOS Backup Utility
+# 📱 iosbk
 
 `iosbk` is a macOS-native command-line tool, written in Swift, that reads an
 iOS backup (encrypted or unencrypted) and lets you selectively extract assets
