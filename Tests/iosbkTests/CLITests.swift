@@ -8,6 +8,7 @@ struct CLITests {
     func helpRendersEverywhere() throws {
         for args in [["-​-help"], ["backups", "--help"], ["list", "--help"],
                      ["profile", "--help"], ["profile", "curate", "--help"], ["profile", "install", "--help"],
+                     ["profile", "list", "--help"], ["profile", "remove", "--help"],
                      ["apps", "--help"], ["apps", "curate", "--help"],
                      ["apps", "download", "--help"], ["apps", "install", "--help"],
                      ["wallet", "--help"], ["wallet", "export", "--help"],
@@ -162,5 +163,20 @@ struct CLITests {
         #expect(install.stdout.contains("cfgutil install-profile"))
         #expect(install.stdout.contains(outputPath.path))
         #expect(FileManager.default.fileExists(atPath: outputPath.path))
+    }
+
+    @Test("profile list without --run only prints the cfgutil command")
+    func profileListWithoutRunOnlyPrints() throws {
+        let list = try CLI.run(["profile", "list"])
+        #expect(list.status == 0, "\(list.stderr)")
+        #expect(list.stdout == "cfgutil get-profiles\n")
+    }
+
+    @Test("profile remove without --run only prints the cfgutil command")
+    func profileRemoveWithoutRunOnlyPrints() throws {
+        let remove = try CLI.run(["profile", "remove", "com.example.test-profile"])
+        #expect(remove.status == 0, "\(remove.stderr)")
+        #expect(remove.stdout.contains("cfgutil remove-profile"))
+        #expect(remove.stdout.contains("com.example.test-profile"))
     }
 }

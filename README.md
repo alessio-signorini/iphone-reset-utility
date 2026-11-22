@@ -204,6 +204,22 @@ The resulting `.mobileconfig` then holds cleartext secrets whenever
 passwords are included — store and transmit it securely, and delete it
 after installing.
 
+### Remove an installed configuration profile
+
+Configuration profiles already installed on a tethered iPhone can be listed
+and removed through Apple Configurator's `cfgutil` command:
+
+```sh
+iosbk profile list
+iosbk profile remove com.example.profile
+iosbk profile remove com.example.profile --run
+```
+
+The default for `remove` is preview-only: it prints the exact `cfgutil`
+command but does not change the device. Add `--run` only after confirming
+the identifier. Profile removal is an irreversible on-device operation. Both
+commands require `cfgutil` and a tethered, unlocked device.
+
 **Certificates** (from an **encrypted** backup) can be curated/installed the
 same way; each is installed with a single tap:
 
@@ -348,6 +364,8 @@ iosbk apps download [--dir DIR]
 iosbk apps install  [--dir DIR] [--strategy cfgutil|appstore-open|html] [--print-only]
 iosbk profile curate  [--keys webclips,wifi,...] [--from FILE...] [--no-passwords] [--backup DIR] [--password PW] -o out.mobileconfig
 iosbk profile install out.mobileconfig [--run]
+iosbk profile list [--run]
+iosbk profile remove PROFILE_IDENTIFIER [--run]
 ```
 
 **Export (restorable)**

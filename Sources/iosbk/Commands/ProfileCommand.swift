@@ -33,12 +33,67 @@ struct ProfileCommand: ParsableCommand {
         Examples:
           iosbk profile curate -o restore.yml
           iosbk profile install restore.yml --run
+          iosbk profile list
+          iosbk profile remove com.example.profile --run
 
         Select what to include: pass --keys webclips,wifi,... to curate \
         (default: all). Edit the keep: true/false flags in the curated file \
         to fine-tune which items actually get installed.
         """,
-        subcommands: [ProfileCurateCommand.self, ProfileInstallCommand.self])
+        subcommands: [
+            ProfileCurateCommand.self,
+            ProfileInstallCommand.self,
+            ProfileListCommand.self,
+            ProfileRemoveCommand.self,
+        ])
+}
+
+struct ProfileListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List configuration profiles currently on the tethered device",
+        discussion: """
+        Runs cfgutil get-profiles without --run; pass --run to execute it.
+        Requires Apple Configurator 2's cfgutil and a tethered, unlocked device.
+        """)
+
+    @Flag(name: .customLong("run"), help: "Actually execute the cfgutil command instead of just printing it")
+    var shouldRun: Bool = false
+
+    func run() throws {
+        try CommandRunner.emit(["cfgutil get-profiles"], run: shouldRun)
+    }
+}
+
+struct ProfileRemoveCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "remove",
+        abstract: "Remove a configuration profile from the tethered device",
+        discussion: """
+        Use `iosbk profile list` to find the profile identifier. Removal is \
+        executed only with --run; without it, this command prints the cfgutil \
+        command for review. This is an irreversible on-device operation.
+        """)
+
+    @Argument(help: "Configuration profile identifier to remove")
+    var identifier: String
+
+    @Flag(name: .customLong("run"), help: "Actually execute the cfgutil removal command")
+    var shouldRun: Bool = false
+
+    func run() throws {
+        let identifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty else {
+            throw ValidationError("Profile identifier cannot be empty")
+        }
+
+        let escaped = identifier
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+        try CommandRunner.emit(["cfgutil remove-profile \"\(escaped)\""], run: shouldRun)
+    }
 }
 
 struct ProfileCurateCommand: ParsableCommand {
